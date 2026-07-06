@@ -210,6 +210,7 @@ impl Metadata for FullMetadata {
             .ver(self.ver)
     }
 }
+
 impl FullMetadata {
     /// Create new Metadata with specified fields
     /// All parameters accept types that can be converted to Option<String>
