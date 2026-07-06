@@ -1,7 +1,7 @@
 //! Projzst core build and streaming archive processing.
 
 use std::fs::{self, File};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, /*Seek, SeekFrom,*/ Write};
 use std::path::{Path, PathBuf};
 
 use crate::errors::{ProjzstError, Result};
@@ -78,7 +78,9 @@ impl Packer {
         let output_file = &self.output_file;
 
         if !input_file.exists() {
-            return Err(ProjzstError::SourceNotFound(input_file.display().to_string()));
+            return Err(ProjzstError::SourceNotFound(
+                input_file.display().to_string(),
+            ));
         }
 
         if let Some(extra_path) = &self.extra_file {
@@ -186,11 +188,11 @@ impl Unpacker {
         let bytes = self.read_raw_bytes()?;
         let mut deserializer = rmp_serde::Deserializer::new(bytes.as_slice());
         let mut unknown_fields = Vec::new();
-        
+
         let _: FullMetadata = serde_ignored::deserialize(&mut deserializer, |path| {
             unknown_fields.push(path.to_string());
         })?;
-        
+
         Ok(unknown_fields)
     }
 
@@ -236,7 +238,11 @@ impl Unpacker {
     }
 
     /// Extracts the compressed tar payload to the target directory and generates metadata.json.
-    pub fn unpack_to<P: AsRef<Path>>(&self, output_dir: P, ignore_unknown: IgnoreUnknown) -> Result<FullMetadata> {
+    pub fn unpack_to<P: AsRef<Path>>(
+        &self,
+        output_dir: P,
+        ignore_unknown: IgnoreUnknown,
+    ) -> Result<FullMetadata> {
         let output_dir = output_dir.as_ref();
         let metadata = self.read_metadata(ignore_unknown)?;
 

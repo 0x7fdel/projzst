@@ -1,9 +1,7 @@
+/*
 use serde::{Deserialize, Serialize};
 
-
-pub trait Frame: Deserialize + Serialize {
-
-}
+pub trait Frame: Deserialize + Serialize {}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MainFrame {
@@ -35,10 +33,8 @@ pub struct MainFrame {
     pub desc: Option<String>,
 }
 
-impl Frame for MainFrame {
-    
-}
+impl Frame for MainFrame {}
 
-impl MainFrame {
-    
-}
+impl MainFrame {}
+
+*/

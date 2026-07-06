@@ -25,5 +25,7 @@ pub use crate::metadata::FullMetadata;
 pub use crate::metadata::IgnoreUnknown;
 pub use crate::metadata::Metadata;
 
+/*
 mod frame;
 pub use crate::frame::Frame;
+*/
