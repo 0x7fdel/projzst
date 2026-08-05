@@ -1,8 +1,8 @@
 //! Frame structure specifications and serialization helper functions for `.pjz` archives.
 
-use std::io::Write;
-use serde::{Deserialize, Serialize};
 use crate::errors::{/* ProjzstError, */ Result};
+use serde::{Deserialize, Serialize};
+use std::io::Write;
 
 /// Fixed Zstd skippable frame magic number used across all Projzst metadata frames.
 pub const PROJZST_FRAME_MAGIC: u32 = 0x184D2A50;

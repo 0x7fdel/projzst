@@ -81,7 +81,9 @@ impl Packer {
         let output_file = &self.output_file;
 
         if !input_file.exists() {
-            return Err(ProjzstError::SourceNotFound(input_file.display().to_string()));
+            return Err(ProjzstError::SourceNotFound(
+                input_file.display().to_string(),
+            ));
         }
 
         // Parse and merge extra JSON file into head_extra if provided
