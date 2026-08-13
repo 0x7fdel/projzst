@@ -10,11 +10,94 @@ pub trait Metadata {
     fn ed(self, ed: Option<String>) -> Self;
     fn ver(self, ver: Option<String>) -> Self;
     fn desc(self, desc: Option<String>) -> Self;
+    
+    fn basic(self) -> BasicMetadata;
 }
 
+/// About basic metadata structure
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BasicMetadata {
+    /// Package name
+    pub name: Option<String>,
+
+    /// Author name
+    pub auth: Option<String>,
+
+    /// Package format identifier
+    pub fmt: Option<String>,
+
+    /// Format edition
+    pub ed: Option<String>,
+
+    /// Project version
+    pub ver: Option<String>,
+
+    /// Package description
+    pub desc: Option<String>,
+}
+
+impl Metadata for BasicMetadata {
+    fn auth(mut self, auth: Option<String>) -> Self {
+        self.auth = auth;
+        self
+    }
+    fn desc(mut self, desc: Option<String>) -> Self {
+        self.desc = desc;
+        self
+    }
+    fn ed(mut self, ed: Option<String>) -> Self {
+        self.ed = ed;
+        self
+    }
+    fn fmt(mut self, fmt: Option<String>) -> Self {
+        self.fmt = fmt;
+        self
+    }
+    fn name(mut self, name: Option<String>) -> Self {
+        self.name = name;
+        self
+    }
+    fn ver(mut self, ver: Option<String>) -> Self {
+        self.ver = ver;
+        self
+    }
+    fn basic(self) -> BasicMetadata {
+        self
+    }
+}
+
+impl BasicMetadata {
+    /// Create new Metadata with specified fields
+    /// All parameters accept types that can be converted to Option<String>
+    pub fn new<I1, I2, I3, I4, I5, I6>(
+        name: I1,
+        auth: I2,
+        fmt: I3,
+        ed: I4,
+        ver: I5,
+        desc: I6,
+    ) -> Self
+    where
+        I1: IntoOpStr,
+        I2: IntoOpStr,
+        I3: IntoOpStr,
+        I4: IntoOpStr,
+        I5: IntoOpStr,
+        I6: IntoOpStr,
+    {
+        Self {
+            name: name.into_op_str(),
+            auth: auth.into_op_str(),
+            fmt: fmt.into_op_str(),
+            ed: ed.into_op_str(),
+            ver: ver.into_op_str(),
+            desc: desc.into_op_str(),
+        }
+    }
+}
+
+
 /// Core in-memory metadata aggregated from archive frames.
-///
-/// This structure no longer directly implements Serde traits.
 /// Individual Frame structures are responsible for binary serialization.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct FullMetadata {
@@ -79,32 +162,30 @@ impl FullMetadata {
 
 impl Metadata for FullMetadata {
     fn name(mut self, name: Option<String>) -> Self {
-        self.name = name;
-        self
+        self.name = name;self
     }
-
     fn auth(mut self, auth: Option<String>) -> Self {
-        self.auth = auth;
-        self
+        self.auth = auth;self
     }
-
     fn fmt(mut self, fmt: Option<String>) -> Self {
-        self.fmt = fmt;
-        self
+        self.fmt = fmt;self
     }
-
     fn ed(mut self, ed: Option<String>) -> Self {
-        self.ed = ed;
-        self
+        self.ed = ed;self
     }
-
     fn ver(mut self, ver: Option<String>) -> Self {
-        self.ver = ver;
-        self
+        self.ver = ver;self
     }
-
     fn desc(mut self, desc: Option<String>) -> Self {
-        self.desc = desc;
-        self
+        self.desc = desc;self
+    }
+    fn basic(self) -> BasicMetadata {
+        BasicMetadata::default()
+            .name(self.name)
+            .auth(self.auth)
+            .desc(self.desc)
+            .ed(self.ed)
+            .fmt(self.fmt)
+            .ver(self.ver)
     }
 }

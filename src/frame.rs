@@ -1,6 +1,7 @@
 //! Frame structure specifications and serialization helper functions for `.pjz` archives.
 
 use crate::errors::{/* ProjzstError, */ Result};
+use crate::metadata::{Metadata, BasicMetadata};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 
@@ -57,6 +58,36 @@ pub struct MainFrame {
 }
 
 impl Frame for MainFrame {}
+
+impl Metadata for MainFrame {
+    fn name(mut self, name: Option<String>) -> Self {
+        self.name = name;self
+    }
+    fn auth(mut self, auth: Option<String>) -> Self {
+        self.auth = auth;self
+    }
+    fn fmt(mut self, fmt: Option<String>) -> Self {
+        self.fmt = fmt;self
+    }
+    fn ed(mut self, ed: Option<String>) -> Self {
+        self.ed = ed;self
+    }
+    fn ver(mut self, ver: Option<String>) -> Self {
+        self.ver = ver;self
+    }
+    fn desc(mut self, desc: Option<String>) -> Self {
+        self.desc = desc;self
+    }
+    fn basic(self) -> BasicMetadata {
+        BasicMetadata::default()
+            .name(self.name)
+            .auth(self.auth)
+            .desc(self.desc)
+            .ed(self.ed)
+            .fmt(self.fmt)
+            .ver(self.ver)
+    }
+}
 
 impl MainFrame {
     pub fn new(pjz: u32) -> Self {
