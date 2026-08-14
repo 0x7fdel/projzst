@@ -1,7 +1,7 @@
 //! Frame structure specifications and serialization helper functions for `.pjz` archives.
 
 use crate::errors::{/* ProjzstError, */ Result};
-use crate::metadata::{Metadata, BasicMetadata};
+use crate::metadata::{BasicMetadata, Metadata};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 
@@ -32,28 +32,28 @@ pub trait Frame: Serialize {
 pub struct MainFrame {
     pub pjz: u32,
 
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub name: Option<String>,
 
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub auth: Option<String>,
 
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub fmt: Option<String>,
 
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub ed: Option<String>,
 
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub ver: Option<String>,
 
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub desc: Option<String>,
 
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub total: Option<u32>,
 
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub tail: Option<u32>,
 }
 
@@ -61,22 +61,28 @@ impl Frame for MainFrame {}
 
 impl Metadata for MainFrame {
     fn name(mut self, name: Option<String>) -> Self {
-        self.name = name;self
+        self.name = name;
+        self
     }
     fn auth(mut self, auth: Option<String>) -> Self {
-        self.auth = auth;self
+        self.auth = auth;
+        self
     }
     fn fmt(mut self, fmt: Option<String>) -> Self {
-        self.fmt = fmt;self
+        self.fmt = fmt;
+        self
     }
     fn ed(mut self, ed: Option<String>) -> Self {
-        self.ed = ed;self
+        self.ed = ed;
+        self
     }
     fn ver(mut self, ver: Option<String>) -> Self {
-        self.ver = ver;self
+        self.ver = ver;
+        self
     }
     fn desc(mut self, desc: Option<String>) -> Self {
-        self.desc = desc;self
+        self.desc = desc;
+        self
     }
     fn basic(self) -> BasicMetadata {
         BasicMetadata::default()

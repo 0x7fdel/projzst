@@ -10,7 +10,7 @@ pub trait Metadata {
     fn ed(self, ed: Option<String>) -> Self;
     fn ver(self, ver: Option<String>) -> Self;
     fn desc(self, desc: Option<String>) -> Self;
-    
+
     fn basic(self) -> BasicMetadata;
 }
 
@@ -96,7 +96,6 @@ impl BasicMetadata {
     }
 }
 
-
 /// Core in-memory metadata aggregated from archive frames.
 /// Individual Frame structures are responsible for binary serialization.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -162,22 +161,28 @@ impl FullMetadata {
 
 impl Metadata for FullMetadata {
     fn name(mut self, name: Option<String>) -> Self {
-        self.name = name;self
+        self.name = name;
+        self
     }
     fn auth(mut self, auth: Option<String>) -> Self {
-        self.auth = auth;self
+        self.auth = auth;
+        self
     }
     fn fmt(mut self, fmt: Option<String>) -> Self {
-        self.fmt = fmt;self
+        self.fmt = fmt;
+        self
     }
     fn ed(mut self, ed: Option<String>) -> Self {
-        self.ed = ed;self
+        self.ed = ed;
+        self
     }
     fn ver(mut self, ver: Option<String>) -> Self {
-        self.ver = ver;self
+        self.ver = ver;
+        self
     }
     fn desc(mut self, desc: Option<String>) -> Self {
-        self.desc = desc;self
+        self.desc = desc;
+        self
     }
     fn basic(self) -> BasicMetadata {
         BasicMetadata::default()

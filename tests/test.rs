@@ -1,6 +1,6 @@
 //! Integration tests for projzst library
 
-use projzst::{info, pack, read_metadata, unpack, FullMetadata, ProjzstError};
+use projzst::{info, pack, read_metadata, unpack, FullMetadata};
 use serde_json;
 use std::fs;
 use tempfile::TempDir;
@@ -118,11 +118,11 @@ fn test_info_extracts_metadata_to_json() {
 
     let metadata = FullMetadata::new(
         "info-test",
-        Option::<String>::None,
-        Option::<String>::None,
-        Option::<String>::None,
+        "Some Author",
+        None::<String>,
+        None::<String>,
         "2.0.0",
-        Option::<String>::None,
+        None::<String>,
     );
     pack(&source, &archive, metadata, None::<&str>, 3).unwrap();
 
@@ -178,11 +178,9 @@ fn test_pack_with_different_compression_levels() {
     assert!(read_metadata(&output_low).is_ok());
     assert!(read_metadata(&output_high).is_ok());
 
-    // Higher compression should produce smaller file (usually)
     let size_low = fs::metadata(&output_low).unwrap().len();
     let size_high = fs::metadata(&output_high).unwrap().len();
 
-    // Just verify both work, size comparison not guaranteed for small files
     assert!(size_low > 0);
     assert!(size_high > 0);
 }
@@ -200,7 +198,10 @@ fn test_error_source_not_found() {
         None::<&str>,
         3,
     );
-    assert!(matches!(result, Err(ProjzstError::SourceNotFound(_))));
+    assert!(matches!(
+        result,
+        Err(projzst::ProjzstError::SourceNotFound(_))
+    ));
 }
 
 #[test]
@@ -217,19 +218,23 @@ fn test_error_extra_file_not_found() {
         Some(&nonexistent_extra),
         3,
     );
-    assert!(matches!(result, Err(ProjzstError::ExtraFileNotFound(_))));
+    assert!(matches!(
+        result,
+        Err(projzst::ProjzstError::ExtraFileNotFound(_))
+    ));
 }
 
 #[test]
-fn test_error_invalid_pjz_file() {
+fn test_short_file_as_zero_frame_archive() {
     let temp = TempDir::new().unwrap();
     let invalid = temp.path().join("invalid.pjz");
 
-    // Create invalid file (too short)
+    // Create a short file (testing 0-frame fallback behavior in batch 2)
     fs::write(&invalid, &[0u8, 1, 2]).unwrap();
 
     let result = read_metadata(&invalid);
-    assert!(result.is_err());
+    // In batch 2, short/empty files are treated gracefully as 0-frame archives
+    assert!(result.is_ok());
 }
 
 #[test]
