@@ -11,16 +11,17 @@ pub use crate::string_utils::convert;
 pub use crate::string_utils::IntoOpStr;
 
 mod builder;
-pub use crate::builder::Packer;
-pub use crate::builder::{info, pack, read_metadata, unpack};
+pub use crate::builder::DEFAULT_ZSTD_LEVEL;
+pub use crate::builder::{info, pack, read_extra_file, read_metadata, unpack};
+pub use crate::builder::{Packer, Unpacker};
 
 mod errors;
 pub use crate::errors::ProjzstError;
 pub use crate::errors::Result;
 
 mod metadata;
-pub use crate::metadata::IgnoreUnknown;
+pub use crate::metadata::FullMetadata;
 pub use crate::metadata::Metadata;
 
-/// Default zstd compression level for pack operation
-pub const DEFAULT_ZSTD_LEVEL: i32 = 6;
+mod frame;
+pub use crate::frame::{ExtraFrame, Frame, LastFrame, MainFrame};

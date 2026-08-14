@@ -1,6 +1,6 @@
 //! Integration tests for projzst library
 
-use projzst::{info, pack, read_metadata, unpack, IgnoreUnknown, Metadata, ProjzstError};
+use projzst::{info, pack, read_metadata, unpack, FullMetadata};
 use serde_json;
 use std::fs;
 use tempfile::TempDir;
@@ -20,8 +20,8 @@ fn create_test_directory(base: &std::path::Path) -> std::path::PathBuf {
 }
 
 /// Helper to create test metadata
-fn create_test_metadata() -> Metadata {
-    Metadata::new(
+fn create_test_metadata() -> FullMetadata {
+    FullMetadata::new(
         "test-project",
         "Test Author",
         "test-format",
@@ -53,7 +53,7 @@ fn test_read_metadata_from_packed_file() {
     let original = create_test_metadata();
     pack(&source, &output, original.clone(), None::<&str>, 3).unwrap();
 
-    let read = read_metadata(&output, IgnoreUnknown::On).unwrap();
+    let read = read_metadata(&output).unwrap();
     assert_eq!(read.name, original.name);
     assert_eq!(read.auth, original.auth);
     assert_eq!(read.fmt, original.fmt);
@@ -71,7 +71,7 @@ fn test_pack_and_unpack_full_cycle() {
 
     let metadata = create_test_metadata();
     pack(&source, &archive, metadata, None::<&str>, 3).unwrap();
-    unpack(&archive, &extract, IgnoreUnknown::On).unwrap();
+    unpack(&archive, &extract).unwrap();
 
     // Verify extracted files match original
     assert!(extract.join("readme.txt").exists());
@@ -97,7 +97,7 @@ fn test_unpack_creates_metadata_json() {
 
     let metadata = create_test_metadata();
     pack(&source, &archive, metadata, None::<&str>, 3).unwrap();
-    unpack(&archive, &extract, IgnoreUnknown::On).unwrap();
+    unpack(&archive, &extract).unwrap();
 
     // metadata.json should be in parent of extract dir
     let metadata_json = temp.path().join("subdir/metadata.json");
@@ -116,17 +116,17 @@ fn test_info_extracts_metadata_to_json() {
     let archive = temp.path().join("test.pjz");
     let json_output = temp.path().join("info/metadata.json");
 
-    let metadata = Metadata::new(
+    let metadata = FullMetadata::new(
         "info-test",
-        Option::<String>::None,
-        Option::<String>::None,
-        Option::<String>::None,
+        "Some Author",
+        None::<String>,
+        None::<String>,
         "2.0.0",
-        Option::<String>::None,
+        None::<String>,
     );
     pack(&source, &archive, metadata, None::<&str>, 3).unwrap();
 
-    let result = info(&archive, &json_output, IgnoreUnknown::On).unwrap();
+    let result = info(&archive, &json_output).unwrap();
     assert_eq!(result.name, Some("info-test".to_string()));
     assert_eq!(result.ver, Some("2.0.0".to_string()));
 
@@ -151,13 +151,14 @@ fn test_pack_with_extra_json_file() {
     }"#;
     fs::write(&extra_file, extra_content).unwrap();
 
-    let metadata = Metadata::default();
+    let metadata = FullMetadata::default();
     pack(&source, &archive, metadata, Some(&extra_file), 3).unwrap();
 
-    let read = read_metadata(&archive, IgnoreUnknown::On).unwrap();
-    assert_eq!(read.extra["custom_field"], "custom_value");
-    assert_eq!(read.extra["numbers"][0], 1);
-    assert_eq!(read.extra["nested"]["a"], 1);
+    let read = read_metadata(&archive).unwrap();
+    assert_eq!(read.head_extra.len(), 1);
+    assert_eq!(read.head_extra[0]["custom_field"], "custom_value");
+    assert_eq!(read.head_extra[0]["numbers"][0], 1);
+    assert_eq!(read.head_extra[0]["nested"]["a"], 1);
 }
 
 #[test]
@@ -174,14 +175,12 @@ fn test_pack_with_different_compression_levels() {
     pack(&source, &output_high, metadata, None::<&str>, 19).unwrap();
 
     // Both should be valid
-    assert!(read_metadata(&output_low, IgnoreUnknown::On).is_ok());
-    assert!(read_metadata(&output_high, IgnoreUnknown::On).is_ok());
+    assert!(read_metadata(&output_low).is_ok());
+    assert!(read_metadata(&output_high).is_ok());
 
-    // Higher compression should produce smaller file (usually)
     let size_low = fs::metadata(&output_low).unwrap().len();
     let size_high = fs::metadata(&output_high).unwrap().len();
 
-    // Just verify both work, size comparison not guaranteed for small files
     assert!(size_low > 0);
     assert!(size_high > 0);
 }
@@ -192,8 +191,17 @@ fn test_error_source_not_found() {
     let nonexistent = temp.path().join("does_not_exist");
     let output = temp.path().join("output.pjz");
 
-    let result = pack(&nonexistent, &output, Metadata::default(), None::<&str>, 3);
-    assert!(matches!(result, Err(ProjzstError::SourceNotFound(_))));
+    let result = pack(
+        &nonexistent,
+        &output,
+        FullMetadata::default(),
+        None::<&str>,
+        3,
+    );
+    assert!(matches!(
+        result,
+        Err(projzst::ProjzstError::SourceNotFound(_))
+    ));
 }
 
 #[test]
@@ -206,23 +214,27 @@ fn test_error_extra_file_not_found() {
     let result = pack(
         &source,
         &output,
-        Metadata::default(),
+        FullMetadata::default(),
         Some(&nonexistent_extra),
         3,
     );
-    assert!(matches!(result, Err(ProjzstError::ExtraFileNotFound(_))));
+    assert!(matches!(
+        result,
+        Err(projzst::ProjzstError::ExtraFileNotFound(_))
+    ));
 }
 
 #[test]
-fn test_error_invalid_pjz_file() {
+fn test_short_file_as_zero_frame_archive() {
     let temp = TempDir::new().unwrap();
     let invalid = temp.path().join("invalid.pjz");
 
-    // Create invalid file (too short)
+    // Create a short file (testing 0-frame fallback behavior in batch 2)
     fs::write(&invalid, &[0u8, 1, 2]).unwrap();
 
-    let result = read_metadata(&invalid, IgnoreUnknown::On);
-    assert!(result.is_err());
+    let result = read_metadata(&invalid);
+    // In batch 2, short/empty files are treated gracefully as 0-frame archives
+    assert!(result.is_ok());
 }
 
 #[test]
@@ -231,7 +243,7 @@ fn test_metadata_with_unicode() {
     let source = create_test_directory(temp.path());
     let archive = temp.path().join("unicode.pjz");
 
-    let metadata = Metadata::new(
+    let metadata = FullMetadata::new(
         "项目名称",
         "作者名 🚀",
         "フォーマット",
@@ -242,7 +254,7 @@ fn test_metadata_with_unicode() {
 
     pack(&source, &archive, metadata.clone(), None::<&str>, 3).unwrap();
 
-    let read = read_metadata(&archive, IgnoreUnknown::On).unwrap();
+    let read = read_metadata(&archive).unwrap();
     assert_eq!(read.name, metadata.name);
     assert_eq!(read.auth, metadata.auth);
     assert_eq!(read.desc, metadata.desc);
@@ -258,7 +270,7 @@ fn test_empty_directory_pack() {
 
     let metadata = create_test_metadata();
     pack(&empty_source, &archive, metadata, None::<&str>, 3).unwrap();
-    unpack(&archive, &extract, IgnoreUnknown::On).unwrap();
+    unpack(&archive, &extract).unwrap();
 
     assert!(extract.exists());
 }

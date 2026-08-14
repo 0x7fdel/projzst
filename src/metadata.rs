@@ -1,83 +1,72 @@
-use crate::errors::ProjzstError;
-use crate::errors::Result;
+//! Metadata representations for `.pjz` archives.
+
 use crate::string_utils::IntoOpStr;
-use serde::{Deserialize, Serialize};
 
-/// Ignore unknown fields behavior
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum IgnoreUnknown {
-    /// Silently ignore unknown fields (default)
-    #[default]
-    On,
-    /// Error on unknown fields
-    Off,
-    /// Collect unknown fields and export them to extra.ignored
-    Export,
+/// Metadata trait for builder pattern configuration.
+pub trait Metadata {
+    fn name(self, name: Option<String>) -> Self;
+    fn auth(self, auth: Option<String>) -> Self;
+    fn fmt(self, fmt: Option<String>) -> Self;
+    fn ed(self, ed: Option<String>) -> Self;
+    fn ver(self, ver: Option<String>) -> Self;
+    fn desc(self, desc: Option<String>) -> Self;
+
+    fn basic(self) -> BasicMetadata;
 }
 
-impl IgnoreUnknown {
-    /// Create from string parameter
-    pub fn from_str_tmp<I: IntoOpStr>(s: I) -> Result<Self> {
-        let a = s.into_op_str().unwrap_or_default();
-        let s: &str = a.as_ref();
-        match s.to_lowercase().as_str() {
-            "on" | "true" | "yes" | "1" => Ok(IgnoreUnknown::On),
-            "off" | "false" | "no" | "0" => Ok(IgnoreUnknown::Off),
-            "export" | "extra" => Ok(IgnoreUnknown::Export),
-            _ => Err(ProjzstError::InvalidIgnoreUnknownParam),
-        }
-    }
-}
-
-/// Metadata structure stored in .pjz file header
-/// All fields are optional except extra which defaults to empty object
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Metadata {
+/// About basic metadata structure
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BasicMetadata {
     /// Package name
-    #[serde(default)]
     pub name: Option<String>,
 
     /// Author name
-    #[serde(default)]
     pub auth: Option<String>,
 
     /// Package format identifier
-    #[serde(default)]
     pub fmt: Option<String>,
 
     /// Format edition
-    #[serde(default)]
     pub ed: Option<String>,
 
     /// Project version
-    #[serde(default)]
     pub ver: Option<String>,
 
     /// Package description
-    #[serde(default)]
     pub desc: Option<String>,
-
-    /// Extra metadata (arbitrary JSON structure)
-    /// When ignore_unknown = Export, unknown fields are stored in extra.ignored
-    #[serde(default)]
-    pub extra: serde_json::Value,
 }
 
-impl Default for Metadata {
-    fn default() -> Self {
-        Self {
-            name: None,
-            auth: None,
-            fmt: None,
-            ed: None,
-            ver: None,
-            desc: None,
-            extra: serde_json::Value::Object(serde_json::Map::new()),
-        }
+impl Metadata for BasicMetadata {
+    fn auth(mut self, auth: Option<String>) -> Self {
+        self.auth = auth;
+        self
+    }
+    fn desc(mut self, desc: Option<String>) -> Self {
+        self.desc = desc;
+        self
+    }
+    fn ed(mut self, ed: Option<String>) -> Self {
+        self.ed = ed;
+        self
+    }
+    fn fmt(mut self, fmt: Option<String>) -> Self {
+        self.fmt = fmt;
+        self
+    }
+    fn name(mut self, name: Option<String>) -> Self {
+        self.name = name;
+        self
+    }
+    fn ver(mut self, ver: Option<String>) -> Self {
+        self.ver = ver;
+        self
+    }
+    fn basic(self) -> BasicMetadata {
+        self
     }
 }
 
-impl Metadata {
+impl BasicMetadata {
     /// Create new Metadata with specified fields
     /// All parameters accept types that can be converted to Option<String>
     pub fn new<I1, I2, I3, I4, I5, I6>(
@@ -103,44 +92,105 @@ impl Metadata {
             ed: ed.into_op_str(),
             ver: ver.into_op_str(),
             desc: desc.into_op_str(),
-            extra: serde_json::Value::Object(serde_json::Map::new()),
+        }
+    }
+}
+
+/// Core in-memory metadata aggregated from archive frames.
+/// Individual Frame structures are responsible for binary serialization.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FullMetadata {
+    pub name: Option<String>,
+    pub auth: Option<String>,
+    pub fmt: Option<String>,
+    pub ed: Option<String>,
+    pub ver: Option<String>,
+    pub desc: Option<String>,
+
+    /// Vector holding extra JSON values inserted in the header area.
+    pub head_extra: Vec<serde_json::Value>,
+}
+
+impl FullMetadata {
+    /// Creates a new `FullMetadata` with basic optional fields.
+    pub fn new<S1, S2, S3, S4, S5, S6>(
+        name: S1,
+        auth: S2,
+        fmt: S3,
+        ed: S4,
+        ver: S5,
+        desc: S6,
+    ) -> Self
+    where
+        S1: IntoOpStr,
+        S2: IntoOpStr,
+        S3: IntoOpStr,
+        S4: IntoOpStr,
+        S5: IntoOpStr,
+        S6: IntoOpStr,
+    {
+        Self {
+            name: name.into_op_str(),
+            auth: auth.into_op_str(),
+            fmt: fmt.into_op_str(),
+            ed: ed.into_op_str(),
+            ver: ver.into_op_str(),
+            desc: desc.into_op_str(),
+            head_extra: Vec::new(),
         }
     }
 
-    /// Set extra metadata from JSON value
-    /// Consumes self and returns updated Metadata
-    pub fn with_extra(mut self, extra: serde_json::Value) -> Self {
-        self.extra = extra;
+    /// Appends a JSON value to `head_extra`.
+    pub fn add_head_extra(&mut self, extra: serde_json::Value) {
+        self.head_extra.push(extra);
+    }
+
+    /// Checks if all user-provided metadata fields and extra lists are empty.
+    ///
+    /// If `true`, no metadata frames should be instantiated, resulting in a 0-frame pure Zstd archive.
+    pub fn is_empty(&self) -> bool {
+        self.name.is_none()
+            && self.auth.is_none()
+            && self.fmt.is_none()
+            && self.ed.is_none()
+            && self.ver.is_none()
+            && self.desc.is_none()
+            && self.head_extra.is_empty()
+    }
+}
+
+impl Metadata for FullMetadata {
+    fn name(mut self, name: Option<String>) -> Self {
+        self.name = name;
         self
     }
-
-    /// Merge unknown fields into extra.ignored
-    /// This is used when ignore_unknown = Export
-    pub fn merge_unknown_fields(&mut self, unknown: serde_json::Value) {
-        if let serde_json::Value::Object(unknown_map) = unknown {
-            // Ensure extra is an object
-            if !self.extra.is_object() {
-                self.extra = serde_json::Value::Object(serde_json::Map::new());
-            }
-
-            if let serde_json::Value::Object(extra_map) = &mut self.extra {
-                // Create or get the "ignored" field
-                let ignored = extra_map
-                    .entry("ignored".to_string())
-                    .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
-
-                // Ensure ignored is an object
-                if !ignored.is_object() {
-                    *ignored = serde_json::Value::Object(serde_json::Map::new());
-                }
-
-                // Merge unknown fields into ignored
-                if let serde_json::Value::Object(ignored_map) = ignored {
-                    for (key, value) in unknown_map {
-                        ignored_map.insert(key, value);
-                    }
-                }
-            }
-        }
+    fn auth(mut self, auth: Option<String>) -> Self {
+        self.auth = auth;
+        self
+    }
+    fn fmt(mut self, fmt: Option<String>) -> Self {
+        self.fmt = fmt;
+        self
+    }
+    fn ed(mut self, ed: Option<String>) -> Self {
+        self.ed = ed;
+        self
+    }
+    fn ver(mut self, ver: Option<String>) -> Self {
+        self.ver = ver;
+        self
+    }
+    fn desc(mut self, desc: Option<String>) -> Self {
+        self.desc = desc;
+        self
+    }
+    fn basic(self) -> BasicMetadata {
+        BasicMetadata::default()
+            .name(self.name)
+            .auth(self.auth)
+            .desc(self.desc)
+            .ed(self.ed)
+            .fmt(self.fmt)
+            .ver(self.ver)
     }
 }

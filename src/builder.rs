@@ -1,35 +1,287 @@
-//! I don't know what I should write there.
+//! Projzst core build and streaming archive processing.
 
 use std::fs::{self, File};
-use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
 
 use crate::errors::{ProjzstError, Result};
-use crate::metadata::{IgnoreUnknown, Metadata};
+use crate::frame::{ExtraFrame, Frame, /* LastFrame, */ MainFrame, PROJZST_FRAME_MAGIC};
+use crate::metadata::FullMetadata;
 
-/// Maximum allowed metadata size (10 MB) to prevent malicious files
+/// Maximum allowed single frame size (10 MB) to prevent memory exhaustion attacks
 const MAX_METADATA_SIZE: usize = 10 * 1024 * 1024;
 
-/// Minimum value of ZStd skippable frame magic number (inclusive)
-const SKIPPABLE_FRAME_MAGIC_MIN: u32 = 0x184D2A50;
-/// Maximum value of ZStd skippable frame magic number (inclusive)
-const SKIPPABLE_FRAME_MAGIC_MAX: u32 = 0x184D2A5F;
-/// Fixed magic number used for metadata frames (any value in the range works)
-const METADATA_FRAME_MAGIC: u32 = 0x184D2A50;
+/// Standard Zstd Compressed Frame magic number
+const ZSTD_FRAME_MAGIC: u32 = 0xFD2FB528;
 
-/// Pack a directory into a .pjz file
-/// Creates archive with MessagePack metadata stored in ZStd skippable frames,
-/// followed by tar.zst compressed content
-///
-///
-/// the Pack Builder for pack operations.
+/// Default zstd compression level for pack operation
+pub const DEFAULT_ZSTD_LEVEL: i32 = 6;
+
+// =========================================================================
+// HELPER FUNCTIONS
+// =========================================================================
+
+/// Reads and parses an optional extra JSON metadata file into a `serde_json::Value`.
+pub fn read_extra_file<P: AsRef<Path>>(extra_path: Option<P>) -> Result<Option<serde_json::Value>> {
+    match extra_path {
+        Some(path) => {
+            let path_ref = path.as_ref();
+            let content = fs::read_to_string(path_ref)
+                .map_err(|_| ProjzstError::ExtraFileNotFound(path_ref.display().to_string()))?;
+            let value: serde_json::Value = serde_json::from_str(&content)?;
+            Ok(Some(value))
+        }
+        None => Ok(None),
+    }
+}
+
+// =========================================================================
+// PACKER IMPLEMENTATION
+// =========================================================================
+
+/// The Pack Builder for archive operations.
 #[derive(Debug, Clone)]
-pub struct Packer {}
+pub struct Packer {
+    input_file: PathBuf,
+    output_file: PathBuf,
+    metadata: FullMetadata,
+    extra_file: Option<PathBuf>,
+    compression_level: i32,
+}
+
+impl Packer {
+    pub fn new<P1: AsRef<Path>, P2: AsRef<Path>>(input_file: P1, output_file: P2) -> Self {
+        Self {
+            input_file: input_file.as_ref().to_path_buf(),
+            output_file: output_file.as_ref().to_path_buf(),
+            metadata: FullMetadata::default(),
+            extra_file: None,
+            compression_level: DEFAULT_ZSTD_LEVEL,
+        }
+    }
+
+    pub fn add_metadata(mut self, metadata: FullMetadata) -> Self {
+        self.metadata = metadata;
+        self
+    }
+
+    pub fn compression_level(mut self, compression_level: i32) -> Self {
+        self.compression_level = compression_level;
+        self
+    }
+
+    pub fn extra_file<P: AsRef<Path>>(mut self, extra_file: Option<P>) -> Self {
+        self.extra_file = extra_file.map(|p| p.as_ref().to_path_buf());
+        self
+    }
+
+    /// Pack a directory into a `.pjz` file.
+    pub fn pack(mut self) -> Result<()> {
+        let input_file = &self.input_file;
+        let output_file = &self.output_file;
+
+        if !input_file.exists() {
+            return Err(ProjzstError::SourceNotFound(
+                input_file.display().to_string(),
+            ));
+        }
+
+        // Parse and merge extra JSON file into head_extra if provided
+        if let Some(extra_val) = read_extra_file(self.extra_file.as_ref())? {
+            self.metadata.add_head_extra(extra_val);
+        }
+
+        if let Some(parent) = output_file.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent)?;
+            }
+        }
+
+        let mut output = File::create(output_file)?;
+
+        // If metadata is completely empty, skip writing all frames (0-frame pure Zstd archive)
+        if !self.metadata.is_empty() {
+            let mut current_frame_idx = 0u32;
+
+            // 1. Write Frame 0: MainFrame
+            let mut main_frame = MainFrame::new(0);
+            main_frame.name = self.metadata.name.clone();
+            main_frame.auth = self.metadata.auth.clone();
+            main_frame.fmt = self.metadata.fmt.clone();
+            main_frame.ed = self.metadata.ed.clone();
+            main_frame.ver = self.metadata.ver.clone();
+            main_frame.desc = self.metadata.desc.clone();
+
+            main_frame.write_frame(&mut output)?;
+            current_frame_idx += 1;
+
+            // 2. Write Head Extra Frames
+            for extra_val in &self.metadata.head_extra {
+                let extra_frame = ExtraFrame::new(current_frame_idx, extra_val.clone());
+                extra_frame.write_frame(&mut output)?;
+                current_frame_idx += 1;
+            }
+        }
+
+        // Write compressed Tar archive Payload
+        let mut zst_encoder = zstd::stream::Encoder::new(&mut output, self.compression_level)?;
+        {
+            let mut tar_builder = tar::Builder::new(&mut zst_encoder);
+            tar_builder.append_dir_all(".", input_file)?;
+        }
+        zst_encoder.finish()?;
+
+        Ok(())
+    }
+}
+
+// =========================================================================
+// UNPACKER IMPLEMENTATION
+// =========================================================================
+
+/// The Unpacker for archive extraction and metadata inspection operations.
+#[derive(Debug, Clone)]
+pub struct Unpacker {
+    input_file: PathBuf,
+}
+
+impl Unpacker {
+    pub fn new<P: AsRef<Path>>(input_file: P) -> Self {
+        Self {
+            input_file: input_file.as_ref().to_path_buf(),
+        }
+    }
+
+    /// Reads metadata from sequential Skippable Frames until standard Payload is reached.
+    pub fn read_metadata(&self) -> Result<FullMetadata> {
+        let mut file = File::open(&self.input_file)?;
+        let mut metadata = FullMetadata::default();
+        let mut frame_count = 0u32;
+
+        loop {
+            let mut magic_buf = [0u8; 4];
+            match file.read_exact(&mut magic_buf) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    break;
+                }
+                Err(e) => return Err(e.into()),
+            }
+
+            let magic = u32::from_le_bytes(magic_buf);
+
+            // If we hit standard Zstd Payload magic at frame 0, return default empty metadata (0-frame archive)
+            if magic == ZSTD_FRAME_MAGIC {
+                break;
+            }
+
+            if magic == PROJZST_FRAME_MAGIC {
+                let mut size_buf = [0u8; 4];
+                file.read_exact(&mut size_buf)?;
+                let frame_size = u32::from_le_bytes(size_buf) as usize;
+
+                if frame_size > MAX_METADATA_SIZE {
+                    return Err(ProjzstError::InvalidMetadataLength(frame_size));
+                }
+
+                let mut frame_data = vec![0u8; frame_size];
+                file.read_exact(&mut frame_data)?;
+
+                if frame_count == 0 {
+                    // Frame 0: Main Frame
+                    if let Ok(main_frame) = rmp_serde::from_slice::<MainFrame>(&frame_data) {
+                        metadata.name = main_frame.name;
+                        metadata.auth = main_frame.auth;
+                        metadata.fmt = main_frame.fmt;
+                        metadata.ed = main_frame.ed;
+                        metadata.ver = main_frame.ver;
+                        metadata.desc = main_frame.desc;
+                    }
+                } else {
+                    // Subsequent Extra Frames
+                    if let Ok(extra_frame) = rmp_serde::from_slice::<ExtraFrame>(&frame_data) {
+                        if let Some(extra_val) = extra_frame.extra {
+                            metadata.add_head_extra(extra_val);
+                        }
+                    }
+                }
+
+                frame_count += 1;
+            } else {
+                // Unknown Frame magic: Skip payload gracefully (IgnoreUnknown Behavior)
+                let mut size_buf = [0u8; 4];
+                file.read_exact(&mut size_buf)?;
+                let frame_size = u32::from_le_bytes(size_buf) as i64;
+                file.seek(SeekFrom::Current(frame_size))?;
+            }
+        }
+
+        Ok(metadata)
+    }
+
+    /// Unpacks archive contents into output directory and writes metadata.json.
+    pub fn unpack_to<P: AsRef<Path>>(&self, output_dir: P) -> Result<FullMetadata> {
+        let output_dir = output_dir.as_ref();
+        let metadata = self.read_metadata()?;
+
+        let mut file = File::open(&self.input_file)?;
+
+        // Skip all head skippable frames to align file stream at the Zstd Payload
+        loop {
+            let pos = file.stream_position()?;
+            let mut magic_buf = [0u8; 4];
+            if file.read_exact(&mut magic_buf).is_err() {
+                break;
+            }
+            let magic = u32::from_le_bytes(magic_buf);
+            if magic == ZSTD_FRAME_MAGIC {
+                file.seek(SeekFrom::Start(pos))?;
+                break;
+            } else if magic == PROJZST_FRAME_MAGIC {
+                let mut size_buf = [0u8; 4];
+                file.read_exact(&mut size_buf)?;
+                let frame_size = u32::from_le_bytes(size_buf) as i64;
+                file.seek(SeekFrom::Current(frame_size))?;
+            } else {
+                file.seek(SeekFrom::Start(pos))?;
+                break;
+            }
+        }
+
+        let zst_decoder = zstd::stream::Decoder::new(&mut file)?;
+        let mut tar_archive = tar::Archive::new(zst_decoder);
+
+        fs::create_dir_all(output_dir)?;
+        tar_archive.unpack(output_dir)?;
+
+        // Optional: Save extracted metadata as pretty JSON if not empty
+        let metadata_json_path = output_dir
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join("metadata.json");
+        let json_content = serde_json::to_string_pretty(&serde_json::json!({
+            "name": metadata.name,
+            "auth": metadata.auth,
+            "fmt": metadata.fmt,
+            "ed": metadata.ed,
+            "ver": metadata.ver,
+            "desc": metadata.desc,
+            "head_extra": metadata.head_extra,
+        }))?;
+        fs::write(metadata_json_path, json_content)?;
+
+        Ok(metadata)
+    }
+}
+
+// =========================================================================
+// FREE FUNCTIONS
+// =========================================================================
 
 pub fn pack<P1, P2, P3>(
-    source_dir: P1,
+    input_file: P1,
     output_file: P2,
-    mut metadata: Metadata,
+    metadata: FullMetadata,
     extra_file: Option<P3>,
     compression_level: i32,
 ) -> Result<()>
@@ -38,251 +290,32 @@ where
     P2: AsRef<Path>,
     P3: AsRef<Path>,
 {
-    let source_dir = source_dir.as_ref();
-    let output_file = output_file.as_ref();
-
-    // Validate source directory exists
-    if !source_dir.exists() {
-        return Err(ProjzstError::SourceNotFound(
-            source_dir.display().to_string(),
-        ));
-    }
-
-    // Load extra metadata from JSON file if provided
-    if let Some(extra_path) = extra_file {
-        let extra_path = extra_path.as_ref();
-        let extra_content = fs::read_to_string(extra_path)
-            .map_err(|_| ProjzstError::ExtraFileNotFound(extra_path.display().to_string()))?;
-        metadata.extra = serde_json::from_str(&extra_content)?;
-    }
-
-    // Serialize metadata to MessagePack bytes
-    let metadata_bytes = rmp_serde::to_vec(&metadata)?;
-    let metadata_len = metadata_bytes.len();
-
-    // Validate metadata size
-    if metadata_len > MAX_METADATA_SIZE {
-        return Err(ProjzstError::InvalidMetadataLength(metadata_len));
-    }
-
-    // Create parent directories if needed
-    if let Some(parent) = output_file.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)?;
-        }
-    }
-
-    // Write final .pjz file: [skippable frame][tar.zst data]
-    let mut output = File::create(output_file)?;
-
-    // Write skippable frame header (magic + size)
-    output.write_all(&METADATA_FRAME_MAGIC.to_le_bytes())?;
-    output.write_all(&(metadata_len as u32).to_le_bytes())?;
-    // Write metadata bytes as frame data
-    output.write_all(&metadata_bytes)?;
-
-    // Append tar.zst compressed data as a standard ZStd frame
-    let mut zst_encoder = zstd::stream::Encoder::new(&mut output, compression_level)?;
-    {
-        let mut tar_builder = tar::Builder::new(&mut zst_encoder);
-        // Add all files from source directory
-        tar_builder.append_dir_all(".", source_dir)?;
-    }
-    // Finalize zstd stream
-    zst_encoder.finish()?;
-
-    Ok(())
+    Packer::new(input_file, output_file)
+        .add_metadata(metadata)
+        .compression_level(compression_level)
+        .extra_file(extra_file)
+        .pack()
 }
 
-/// Internal helper: read metadata from a file with ignore_unknown parameter
-/// Returns metadata and leaves file cursor at the start of the first ZStd frame
-fn read_metadata_from_file(file: &mut File, ignore_unknown: IgnoreUnknown) -> Result<Metadata> {
-    let mut metadata_bytes = Vec::new();
-
-    loop {
-        let mut magic_buf = [0u8; 4];
-        match file.read_exact(&mut magic_buf) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                // EOF while reading magic: if we already have metadata, accept it;
-                // otherwise the file is completely invalid
-                if metadata_bytes.is_empty() {
-                    return Err(ProjzstError::InvalidFileHeader);
-                } else {
-                    break; // metadata only, no ZStd frame
-                }
-            }
-            Err(e) => return Err(e.into()),
-        }
-
-        let magic = u32::from_le_bytes(magic_buf);
-
-        // Check if this is a skippable frame
-        if (SKIPPABLE_FRAME_MAGIC_MIN..=SKIPPABLE_FRAME_MAGIC_MAX).contains(&magic) {
-            // Read frame size (little-endian)
-            let mut size_buf = [0u8; 4];
-            file.read_exact(&mut size_buf)?;
-            let frame_size = u32::from_le_bytes(size_buf) as usize;
-
-            // Validate total metadata size
-            if metadata_bytes.len() + frame_size > MAX_METADATA_SIZE {
-                return Err(ProjzstError::InvalidMetadataLength(frame_size));
-            }
-
-            // Read frame data
-            let mut frame_data = vec![0u8; frame_size];
-            file.read_exact(&mut frame_data)?;
-            metadata_bytes.extend_from_slice(&frame_data);
-        } else {
-            // Not a skippable frame - assume it's the start of ZStd compressed data
-            // Rewind so the ZStd decoder can read the magic again
-            file.seek(SeekFrom::Current(-4))?;
-            break;
-        }
-    }
-
-    // Ensure we actually read some metadata
-    if metadata_bytes.is_empty() {
-        return Err(ProjzstError::InvalidFileHeader);
-    }
-
-    // Deserialize MessagePack to Metadata struct with ignore_unknown handling
-    match ignore_unknown {
-        IgnoreUnknown::On => {
-            // Silently ignore unknown fields
-            let metadata: Metadata = rmp_serde::from_slice(&metadata_bytes)?;
-            Ok(metadata)
-        }
-        IgnoreUnknown::Off => {
-            // Check for unknown fields using serde_ignored
-            let mut deserializer = rmp_serde::Deserializer::new(&metadata_bytes[..]);
-            let mut unknown_fields = Vec::new();
-
-            let metadata: Metadata = serde_ignored::deserialize(&mut deserializer, |path| {
-                unknown_fields.push(path.to_string());
-            })?;
-
-            if !unknown_fields.is_empty() {
-                return Err(ProjzstError::UnknownFields(unknown_fields.join(", ")));
-            }
-
-            Ok(metadata)
-        }
-        IgnoreUnknown::Export => {
-            // Deserialize into a generic Value first
-            let full_value: serde_json::Value = rmp_serde::from_slice(&metadata_bytes)?;
-
-            if let serde_json::Value::Object(map) = full_value {
-                // Known fields we want to extract
-                let known_fields = ["name", "auth", "fmt", "ed", "ver", "desc", "extra"];
-
-                // Build a map of known fields
-                let mut known_map = serde_json::Map::new();
-                let mut unknown_map = serde_json::Map::new();
-
-                for (key, value) in map {
-                    if known_fields.contains(&key.as_str()) {
-                        known_map.insert(key, value);
-                    } else {
-                        unknown_map.insert(key, value);
-                    }
-                }
-
-                // Deserialize known fields into Metadata
-                let known_value = serde_json::Value::Object(known_map);
-                let mut metadata: Metadata = serde_json::from_value(known_value)?;
-
-                // Merge unknown fields into extra.ignored
-                if !unknown_map.is_empty() {
-                    metadata.merge_unknown_fields(serde_json::Value::Object(unknown_map));
-                }
-
-                Ok(metadata)
-            } else {
-                // Not an object - just try normal deserialization
-                Ok(rmp_serde::from_slice(&metadata_bytes)?)
-            }
-        }
-    }
+pub fn read_metadata<P: AsRef<Path>>(input_file: P) -> Result<FullMetadata> {
+    Unpacker::new(input_file).read_metadata()
 }
 
-/// Read only metadata from a .pjz file without extracting content
-/// Returns the metadata found in the skippable frames
-///
-/// # Arguments
-/// * `input_file` - Path to the .pjz file
-/// * `ignore_unknown` - How to handle unknown fields in metadata
-pub fn read_metadata<P: AsRef<Path>>(
-    input_file: P,
-    ignore_unknown: IgnoreUnknown,
-) -> Result<Metadata> {
-    let mut file = File::open(input_file.as_ref())?;
-    read_metadata_from_file(&mut file, ignore_unknown)
-}
-
-/// Unpack a .pjz file to target directory
-/// Extracts content, writes metadata.json to parent directory of output,
-/// and returns the metadata
-///
-/// # Arguments
-/// * `input_file` - Path to the .pjz file
-/// * `output_dir` - Directory to extract contents to
-/// * `ignore_unknown` - How to handle unknown fields in metadata
-pub fn unpack<P1, P2>(
-    input_file: P1,
-    output_dir: P2,
-    ignore_unknown: IgnoreUnknown,
-) -> Result<Metadata>
+pub fn unpack<P1, P2>(input_file: P1, output_dir: P2) -> Result<FullMetadata>
 where
     P1: AsRef<Path>,
     P2: AsRef<Path>,
 {
-    let input_file = input_file.as_ref();
-    let output_dir = output_dir.as_ref();
-
-    let mut file = File::open(input_file)?;
-    // Read metadata and position cursor at start of ZStd frame
-    let metadata = read_metadata_from_file(&mut file, ignore_unknown)?;
-
-    // Decompress zstd and extract tar archive
-    // File cursor is now at the start of the ZStd compressed data
-    let zst_decoder = zstd::stream::Decoder::new(&mut file)?;
-    let mut tar_archive = tar::Archive::new(zst_decoder);
-
-    // Create output directory and extract files
-    fs::create_dir_all(output_dir)?;
-    tar_archive.unpack(output_dir)?;
-
-    // Write metadata.json to parent directory of output_dir
-    let metadata_json_path = output_dir
-        .parent()
-        .unwrap_or(Path::new("."))
-        .join("metadata.json");
-    let json_content = serde_json::to_string_pretty(&metadata)?;
-    fs::write(metadata_json_path, json_content)?;
-
-    Ok(metadata)
+    Unpacker::new(input_file).unpack_to(output_dir)
 }
 
-/// Extract metadata from .pjz file and save as JSON
-/// Returns the metadata and writes it to the specified JSON file
-///
-/// # Arguments
-/// * `input_file` - Path to the .pjz file
-/// * `output_json` - Path where to save the JSON file
-/// * `ignore_unknown` - How to handle unknown fields in metadata
-pub fn info<P1, P2>(
-    input_file: P1,
-    output_json: P2,
-    ignore_unknown: IgnoreUnknown,
-) -> Result<Metadata>
+pub fn info<P1, P2>(input_file: P1, output_json: P2) -> Result<FullMetadata>
 where
     P1: AsRef<Path>,
     P2: AsRef<Path>,
 {
-    let metadata = read_metadata(input_file, ignore_unknown)?;
+    let metadata = Unpacker::new(input_file).read_metadata()?;
 
-    // Create parent directory if needed
     let output_json = output_json.as_ref();
     if let Some(parent) = output_json.parent() {
         if !parent.as_os_str().is_empty() {
@@ -290,8 +323,15 @@ where
         }
     }
 
-    // Write pretty-printed JSON
-    let json_content = serde_json::to_string_pretty(&metadata)?;
+    let json_content = serde_json::to_string_pretty(&serde_json::json!({
+        "name": metadata.name,
+        "auth": metadata.auth,
+        "fmt": metadata.fmt,
+        "ed": metadata.ed,
+        "ver": metadata.ver,
+        "desc": metadata.desc,
+        "head_extra": metadata.head_extra,
+    }))?;
     fs::write(output_json, json_content)?;
 
     Ok(metadata)
